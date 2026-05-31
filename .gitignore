@@ -23,6 +23,13 @@ dist/
 # IDE
 .vscode/
 .idea/
+.trae/
+
+# TypeScript
+*.tsbuildinfo
+
+# Logs
+data/logs/
 
 # OS
 .DS_Store
