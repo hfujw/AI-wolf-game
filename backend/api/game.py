@@ -1,6 +1,5 @@
-import random
-import string
 import asyncio
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -12,7 +11,6 @@ from models.game import Game
 from models.game_player import GamePlayer
 from models.game_event import GameEvent
 from schemas.game_schemas import (
-    RoomCreateResponse,
     JoinRoomRequest,
     GameStatusResponse,
     AlivePlayerInfo,
@@ -30,63 +28,23 @@ from services.game_service import GameService, game_services
 router = APIRouter()
 
 
-def _generate_room_code() -> str:
-    return "".join(random.choices(string.ascii_uppercase, k=4))
-
-
-@router.get("/rooms")
-async def list_rooms(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Room).order_by(Room.id.desc()).limit(50))
-    rooms = result.scalars().all()
-    return [{"id": r.id, "room_code": r.room_code, "status": r.status, "created_at": r.created_at.isoformat() if r.created_at else None} for r in rooms]
-
-
-@router.post("/rooms", response_model=RoomCreateResponse)
-async def create_room(db: AsyncSession = Depends(get_db)):
-    for _ in range(10):
-        code = _generate_room_code()
-        result = await db.execute(select(Room).where(Room.room_code == code))
-        existing = result.scalar_one_or_none()
-        if not existing:
-            break
-
-    room = Room(room_code=code, status="waiting")
+@router.post("/games/start")
+async def start_new_game(db: AsyncSession = Depends(get_db)):
+    """
+    一键开始新游戏：创建房间 → 分配角色 → 启动游戏引擎。
+    返回 {game_id} 前端可直接跳转到 /game/{game_id}
+    """
+    room_code = uuid.uuid4().hex[:8].upper()
+    room = Room(room_code=room_code, status="playing")
     db.add(room)
     await db.commit()
     await db.refresh(room)
 
-    return RoomCreateResponse(room_id=room.id, room_code=room.room_code)
-
-
-@router.post("/rooms/{room_id}/join")
-async def join_room(room_id: int, req: JoinRoomRequest, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Room).where(Room.id == room_id))
-    room = result.scalar_one_or_none()
-    if not room:
-        raise HTTPException(status_code=404, detail="房间不存在")
-    if room.status != "waiting":
-        raise HTTPException(status_code=400, detail="房间已开始或已结束")
-
-    return {"room_id": room.id, "room_code": room.room_code, "message": "加入成功"}
-
-
-@router.post("/rooms/{room_id}/start")
-async def start_game(room_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Room).where(Room.id == room_id))
-    room = result.scalar_one_or_none()
-    if not room:
-        raise HTTPException(status_code=404, detail="房间不存在")
-    if room.status != "waiting":
-        raise HTTPException(status_code=400, detail="游戏已开始")
-
-    room.status = "playing"
-    await db.commit()
-
     service = GameService(db)
-    game = await service.start_game(room_id)
+    game = await service.start_game(room.id)
     await db.commit()
 
-    return {"game_id": game.id, "message": "游戏已开始"}
+    return {"game_id": game.id}
 
 
 @router.post("/games/{game_id}/force-start")
@@ -127,33 +85,6 @@ async def force_start_game(game_id: int, db: AsyncSession = Depends(get_db)):
         "round_number": engine.round,
         "message": "游戏已手动启动",
     }
-
-
-@router.get("/rooms/lookup/{room_code}")
-async def lookup_room(room_code: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Room).where(Room.room_code == room_code.upper()))
-    room = result.scalar_one_or_none()
-    if not room:
-        raise HTTPException(status_code=404, detail="房间不存在")
-    return {"id": room.id, "room_code": room.room_code, "status": room.status}
-
-
-@router.get("/rooms/{room_id}/status")
-async def get_room_status(room_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Room).where(Room.id == room_id))
-    room = result.scalar_one_or_none()
-    if not room:
-        raise HTTPException(status_code=404, detail="房间不存在")
-
-    game_result = await db.execute(
-        select(Game).where(Game.room_id == room_id).order_by(Game.id.desc()).limit(1)
-    )
-    game = game_result.scalar_one_or_none()
-
-    if not game:
-        return {"room_id": room.id, "room_code": room.room_code, "status": room.status}
-
-    return await _build_game_status(game.id, db)
 
 
 @router.get("/games/{game_id}/status", response_model=GameStatusResponse)

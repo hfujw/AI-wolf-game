@@ -4,12 +4,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.game_event import GameEvent
 from models.game_player import GamePlayer
 from schemas.game_schemas import AgentContext, AlivePlayerInfo, VisibleEvent
+from memory.summarizer import ConversationSummarizer
 
 
 class Memory:
     def __init__(self):
         self.conversations: list[dict] = []
         self.current_round_discussions: list[dict] = []
+        self.summarizer = ConversationSummarizer(window_size=10, summary_interval=3)
 
     def add_conversation(self, round_number: int, phase: str, speaker: str, content: str, event_type: str = "discussion"):
         conv = {
@@ -20,6 +22,7 @@ class Memory:
             "type": event_type,
         }
         self.conversations.append(conv)
+        self.summarizer.add(conv)
         if phase in ("day_speech", "day_vote"):
             self.current_round_discussions.append(conv)
 
@@ -27,26 +30,7 @@ class Memory:
         self.current_round_discussions = []
 
     def get_all_conversations(self) -> str:
-        if not self.conversations:
-            return "暂无历史记录"
-
-        formatted = []
-        current_round = None
-        for conv in self.conversations:
-            if current_round != conv["round"]:
-                current_round = conv["round"]
-                formatted.append(f"\n=== 第 {current_round} 回合 ===")
-            if conv.get("type") == "death":
-                formatted.append(f"💀 {conv['content']}")
-            elif conv.get("type") == "vote":
-                formatted.append(f"🗳 {conv['speaker']}{conv['content']}")
-            elif conv.get("type") == "elimination":
-                formatted.append(f"⚖️ {conv['content']}")
-            elif conv.get("type") == "hunter_shoot":
-                formatted.append(f"🔫 {conv['content']}")
-            else:
-                formatted.append(f"{conv['speaker']}说：{conv['content']}")
-        return "\n".join(formatted)
+        return self.summarizer.get_context(self.conversations[-1]["round"] if self.conversations else 0)
 
 
 class MemoryManager:
@@ -66,7 +50,7 @@ class MemoryManager:
 
         alive_players = []
         for p in all_players:
-            alive_players.append(AlivePlayerInfo(id=p.id, name=p.player_name, seat_number=p.seat_number, is_alive=p.is_alive, role=p.role))
+            alive_players.append(AlivePlayerInfo(id=p.id, name=p.player_name, seat_number=p.seat_number, is_alive=p.is_alive, role=None))  # 不暴露角色给任何玩家
 
         event_result = await self.db.execute(
             select(GameEvent).where(GameEvent.game_id == self.game_id).order_by(GameEvent.id)
@@ -113,10 +97,14 @@ class MemoryManager:
 
         valid_targets = self._get_valid_targets(phase, role, player_id, all_players, werewolf_partners)
 
+        own_player = next((p for p in all_players if p.id == player_id), None)
+        my_seat = own_player.seat_number if own_player else 0
+
         return AgentContext(
             phase=phase,
             round_number=round_number,
             player_id=player_id,
+            my_seat_number=my_seat,
             role=role,
             personality=personality,
             alive_players=alive_players,
@@ -131,6 +119,9 @@ class MemoryManager:
     def _filter_events(self, events: list[GameEvent], player_id: int, role: str) -> list[VisibleEvent]:
         visible = []
         for event in events:
+            # 过滤掉 UI 专用事件，AI 不需要这些
+            if event.event_type in ("night_summary", "agent_thinking", "thinking_clear"):
+                continue
             ve = VisibleEvent(
                 id=event.id, round_number=event.round_number, phase=event.phase,
                 player_id=event.player_id, event_type=event.event_type,

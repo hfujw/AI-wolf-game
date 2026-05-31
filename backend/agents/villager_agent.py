@@ -9,26 +9,7 @@ class VillagerAgent(BaseAgent):
         super().__init__(player_id, "villager", personality, llm_client)
 
     async def decide(self, context: AgentContext) -> AgentDecision:
-        try:
-            if context.phase == "day_speech":
-                return await self._decide_speech(context)
-            elif context.phase == "day_vote":
-                return await self._decide_vote(context)
-            else:
-                return AgentDecision(action="pass", internal_thought="等待下一阶段。")
-        except Exception:
-            return self.llm_client.get_fallback(context.phase, self.role, context.valid_targets)
-
-    def _build_history(self, context: AgentContext) -> str:
-        lines = []
-        for event in context.visible_events[-20:]:
-            line = f"[第{event.round_number}轮][{event.phase}] "
-            if event.public_content:
-                line += event.public_content
-            if event.private_content:
-                line += f" (私密: {event.private_content})"
-            lines.append(line)
-        return "\n".join(lines) if lines else ""
+        return await self._decide_with_react(context)
 
     async def _decide_speech(self, context: AgentContext) -> AgentDecision:
         system_prompt = get_system_prompt("villager", self.personality)

@@ -28,6 +28,7 @@ class AgentContext(BaseModel):
     phase: str
     round_number: int
     player_id: int
+    my_seat_number: int = 0
     role: str
     personality: str
     alive_players: list[AlivePlayerInfo]

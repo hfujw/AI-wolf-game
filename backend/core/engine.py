@@ -125,7 +125,28 @@ class GameEngine:
         ts = time.strftime("%H:%M:%S")
         line = f"[{ts}] {msg}"
         self._log.append(line)
-        print(line)
+        print(line, flush=True)
+
+    def _log_god_view_start(self):
+        werewolves = [p for p in self.players if p.role == "werewolf" and p.is_alive]
+        seer = next((p for p in self.players if p.role == "seer" and p.is_alive), None)
+        witch = next((p for p in self.players if p.role == "witch" and p.is_alive), None)
+        hunter = next((p for p in self.players if p.role == "hunter" and p.is_alive), None)
+        villagers = [p for p in self.players if p.role == "villager" and p.is_alive]
+
+        alive_w = [f"{w.seat_number}号{w.player_name}" for w in werewolves]
+        self.log(f"🐺 狼人({len(alive_w)}): {', '.join(alive_w)}" if alive_w else "🐺 狼人: 全灭")
+        if seer:
+            self.log(f"🔮 预言家: {seer.seat_number}号{seer.player_name}")
+        if witch:
+            antidote = "解药✓" if self.witch_has_antidote else "解药✗"
+            poison = "毒药✓" if self.witch_has_poison else "毒药✗"
+            self.log(f"🧪 女巫: {witch.seat_number}号{witch.player_name} ({antidote} {poison})")
+        if hunter:
+            self.log(f"🏹 猎人: {hunter.seat_number}号{hunter.player_name} (可开枪: {'是' if self.hunter_can_shoot else '否'})")
+        alive_v = [f"{v.seat_number}号{v.player_name}" for v in villagers]
+        self.log(f"👤 村民({len(alive_v)}): {', '.join(alive_v)}" if alive_v else "👤 村民: 全灭")
+        self.log("")
 
     async def emit_event(self, event: GameEvent):
         async with async_session() as db:
@@ -224,6 +245,13 @@ class GameEngine:
             await self.emit_event(end_event)
 
     async def night_phase(self):
+        # 天黑请闭眼 — 上帝视角：显示各特殊玩家状态
+        self.log("")
+        self.log("┌──────────────────────────────────────────┐")
+        self.log("│ 🌙 上 帝 视 角 · 夜 间 行 动 │")
+        self.log("└──────────────────────────────────────────┘")
+        self._log_god_view_start()
+
         await self.emit_event(GameEvent(
             game_id=self.game.id,
             round_number=self.round,
@@ -260,6 +288,36 @@ class GameEngine:
         await self._apply_deaths(deaths)
         self.log(f"死亡: {deaths}")
 
+        # 上帝视角：夜晚行动总结
+        night_summary_parts = []
+        if wolf_target_id:
+            try:
+                wolf_victim = next((p for p in self.players if p.id == int(wolf_target_id)), None)
+                if wolf_victim:
+                    night_summary_parts.append(f"🐺 狼人袭击了 {wolf_victim.seat_number}号")
+            except (ValueError, TypeError):
+                pass
+        if witch_decision.use_antidote:
+            night_summary_parts.append("💚 女巫使用了解药救人")
+        if witch_decision.use_poison and witch_decision.poison_target:
+            try:
+                poison_victim = next((p for p in self.players if p.id == int(witch_decision.poison_target)), None)
+                if poison_victim:
+                    night_summary_parts.append(f"☠️ 女巫毒杀了 {poison_victim.seat_number}号")
+            except (ValueError, TypeError):
+                pass
+        if seer_check:
+            night_summary_parts.append(f"🔮 预言家完成了查验")
+        if deaths:
+            night_summary_parts.append(f"💀 死亡: {', '.join(str(d) for d in deaths)}号")
+        else:
+            night_summary_parts.append("✨ 无人死亡")
+        if night_summary_parts:
+            await self.emit_event(GameEvent(
+                game_id=self.game.id, round_number=self.round, phase="night_summary",
+                event_type="night_summary", public_content=" | ".join(night_summary_parts),
+            ))
+
         hunter_died = any(
             pid for pid in deaths
             if next((p for p in self.players if p.id == pid), None) and
@@ -283,7 +341,7 @@ class GameEngine:
             self.log("狼人全灭，跳过")
             return None
 
-        self.log(f"狼人: {[(w.id, w.player_name) for w in wolf_players]}")
+        self.log(f"🐺 狼人团队: {[(w.seat_number, w.player_name) for w in wolf_players]}")
 
         async with async_session() as db:
             memory_manager = MemoryManager(db, self.game.id, self.memory)
@@ -295,9 +353,19 @@ class GameEngine:
                 contexts[wp.id] = ctx
 
         wolf_ids = [wp.id for wp in wolf_players]
-        self.log(f"调用LLM狼人决策... (超时{Config.LLM_TIMEOUT}s)")
+        self.log(f"🔪 狼人正在商议刀人... (并发控制: Semaphore(3), 超时{Config.LLM_TIMEOUT}s)")
+        for wp in wolf_players:
+            await self.emit_event(GameEvent(game_id=self.game.id, round_number=self.round, phase="night_werewolf", player_id=wp.id, event_type="agent_thinking", public_content=f"{wp.seat_number}号正在思考..."))
         target_id, decisions = await self.agent_manager.ask_wolves(wolf_ids, contexts)
-        self.log(f"狼人抉择: target={target_id}")
+        for wp in wolf_players:
+            await self.emit_event(GameEvent(game_id=self.game.id, round_number=self.round, phase="night_werewolf", player_id=wp.id, event_type="thinking_clear", public_content=""))
+
+        # 上帝视角日志：显示每个狼人的决定
+        for i, decision in enumerate(decisions):
+            if i < len(wolf_ids):
+                wp = wolf_players[i]
+                self.log(f"   狼{wp.seat_number}号({wp.player_name})选择刀 → {decision.target_id}号")
+                self.stats.record_ability_use(wolf_ids[i], "kill")
 
         if target_id is None:
             alive_non_wolves = [p for p in self.players if p.is_alive and p.role != "werewolf"]
@@ -307,17 +375,16 @@ class GameEngine:
 
         for i, decision in enumerate(decisions):
             if i < len(wolf_ids):
-                self.stats.record_ability_use(wolf_ids[i], "kill")
-            await self.emit_event(GameEvent(
-                game_id=self.game.id,
-                round_number=self.round,
-                phase="night_werewolf",
-                player_id=getattr(decision, 'player_id', None),
-                event_type="action",
-                private_content=f"狼人选择击杀玩家 {decision.target_id}",
-                internal_thought=decision.internal_thought,
-                reasoning_content=decision.reasoning,
-            ))
+                await self.emit_event(GameEvent(
+                    game_id=self.game.id,
+                    round_number=self.round,
+                    phase="night_werewolf",
+                    player_id=wolf_ids[i],
+                    event_type="action",
+                    private_content=f"狼人选择击杀玩家 {decision.target_id}",
+                    internal_thought=decision.internal_thought,
+                    reasoning_content=decision.reasoning,
+                ))
 
         try:
             return int(target_id) if target_id else None
@@ -335,9 +402,10 @@ class GameEngine:
             ctx = await memory_manager.build_context(seer_player.id, seer_player.role, seer_player.personality or "", game_state)
             ctx.conversation_history = self.memory.get_all_conversations()
 
-        self.log(f"调用LLM预言家决策...")
+        self.log(f"🔮 预言家 {seer_player.seat_number}号({seer_player.player_name}) 正在查验...")
+        await self.emit_event(GameEvent(game_id=self.game.id, round_number=self.round, phase="night_seer", player_id=seer_player.id, event_type="agent_thinking", public_content=f"{seer_player.seat_number}号正在思考..."))
         decision = await self.agent_manager.ask_seer(seer_player.id, ctx)
-        self.log(f"预言家查验: {decision.target_id}")
+        await self.emit_event(GameEvent(game_id=self.game.id, round_number=self.round, phase="night_seer", player_id=seer_player.id, event_type="thinking_clear", public_content=""))
         self.stats.record_ability_use(seer_player.id, "check")
 
         result = {}
@@ -354,9 +422,12 @@ class GameEngine:
                         "is_werewolf": is_werewolf,
                     }
                     private_content = f"查验玩家 {target_player.seat_number}号({target_player.player_name})，结果为：{result['result']}"
+                    self.log(f"🔮 预言家查验 {target_player.seat_number}号({target_player.player_name}) → {result['result']}")
+                    self.log(f"   内心独白: {decision.internal_thought[:80] if decision.internal_thought else '(无)'}")
             except (ValueError, TypeError):
                 result = {"target_id": decision.target_id, "result": "查验失败"}
                 private_content = f"查验玩家 {decision.target_id}，结果无效"
+                self.log(f"🔮 预言家查验失败: target={decision.target_id}")
 
             await self.emit_event(GameEvent(
                 game_id=self.game.id,
@@ -397,13 +468,20 @@ class GameEngine:
         ctx.witch_info["has_antidote"] = self.witch_has_antidote
         ctx.witch_info["has_poison"] = self.witch_has_poison
 
-        self.log(f"调用LLM女巫决策... victim={wolf_target_id}")
+        self.log(f"🧪 女巫 {witch_player.seat_number}号({witch_player.player_name}) 正在决定用药...")
+        self.log(f"   今晚狼人袭击: {'平安夜' if not wolf_target_id else f'{wolf_target_id}号'}")
+        await self.emit_event(GameEvent(game_id=self.game.id, round_number=self.round, phase="night_witch", player_id=witch_player.id, event_type="agent_thinking", public_content=f"{witch_player.seat_number}号正在思考..."))
         decision = await self.agent_manager.ask_witch(witch_player.id, ctx)
-        self.log(f"女巫: antidote={decision.use_antidote} poison={decision.use_poison}")
+        await self.emit_event(GameEvent(game_id=self.game.id, round_number=self.round, phase="night_witch", player_id=witch_player.id, event_type="thinking_clear", public_content=""))
         if decision.use_antidote:
+            self.log(f"🧪 女巫使用解药 → 救活")
             self.stats.record_ability_use(witch_player.id, "antidote")
         if decision.use_poison:
+            self.log(f"🧪 女巫使用毒药 → 毒杀 {decision.poison_target}号")
             self.stats.record_ability_use(witch_player.id, "poison")
+        if not decision.use_antidote and not decision.use_poison:
+            self.log(f"🧪 女巫不使用任何药水")
+        self.log(f"   内心独白: {decision.internal_thought[:80] if decision.internal_thought else '(无)'}")
 
         if decision.use_antidote and decision.use_poison:
             decision.use_poison = False
@@ -506,7 +584,9 @@ class GameEngine:
             ctx.conversation_history = self.memory.get_all_conversations()
             ctx.valid_targets = [p.id for p in self.players if p.is_alive and p.id != hunter_player.id]
 
+        await self.emit_event(GameEvent(game_id=self.game.id, round_number=self.round, phase="hunter_shoot", player_id=hunter_player.id, event_type="agent_thinking", public_content=f"{hunter_player.seat_number}号正在思考..."))
         decision = await self.agent_manager.ask_hunter(hunter_player.id, ctx)
+        await self.emit_event(GameEvent(game_id=self.game.id, round_number=self.round, phase="hunter_shoot", player_id=hunter_player.id, event_type="thinking_clear", public_content=""))
         self.log(f"猎人开枪: target={decision.target_id}")
         self.stats.record_ability_use(hunter_player.id, "shoot")
 
@@ -590,7 +670,7 @@ class GameEngine:
                 ))
                 self.memory.add_conversation(self.round, "day_speech", f"{player.seat_number}号{player.player_name}", decision.speech or "", "discussion")
                 self.stats.record_speech(player.id)
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(1.0)
 
         self.phase = "day_vote"
         await self._emit_phase_change("day_vote", "进入投票环节，请各位玩家投票。")
@@ -608,7 +688,13 @@ class GameEngine:
                 contexts[player.id] = ctx
 
         self.log(f"调用LLM投票: {len(contexts)}个玩家")
+        for pid in contexts:
+            voter = next((p for p in self.players if p.id == pid), None)
+            if voter:
+                await self.emit_event(GameEvent(game_id=self.game.id, round_number=self.round, phase="day_vote", player_id=pid, event_type="agent_thinking", public_content=f"{voter.seat_number}号正在思考..."))
         votes = await self.agent_manager.ask_votes(contexts)
+        for pid in contexts:
+            await self.emit_event(GameEvent(game_id=self.game.id, round_number=self.round, phase="day_vote", player_id=pid, event_type="thinking_clear", public_content=""))
 
         vote_count: dict[str, int] = {}
         for pid, decision in votes.items():

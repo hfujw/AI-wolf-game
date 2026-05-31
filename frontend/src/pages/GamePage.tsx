@@ -4,7 +4,6 @@ import { AnimatePresence, motion } from 'framer-motion';
 import BackgroundParticles from '../components/BackgroundParticles';
 import RoundTable from '../components/RoundTable';
 import BattleLog from '../components/BattleLog';
-import PhaseOverlay, { DawnBanner, DawnInfo, NightToast } from '../components/PhaseOverlay';
 import ChatBubble from '../components/ChatBubble';
 import MVPDialog from '../components/MVPDialog';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -91,8 +90,7 @@ interface ChatItem {
   text: string;
   speaker: string;
   type: 'speech' | 'thought' | 'system';
-  typing: boolean;
-  systemType?: 'phase' | 'vote';
+  typing?: boolean;
 }
 
 const PHASE_LABELS: Record<string, string> = {
@@ -127,7 +125,7 @@ function buildLogs(events: GameEvent[], players: Player[]): LogEntry[] {
       text = `${seatStr} ${e.content}`;
     } else if (e.event_type === 'speech') {
       type = 'speech';
-      text = `${seatStr}: "${e.content}"`;
+      text = e.content;
     } else {
       type = 'system';
       text = e.content || e.event_type;
@@ -137,29 +135,6 @@ function buildLogs(events: GameEvent[], players: Player[]): LogEntry[] {
   });
 }
 
-function buildDawnInfo(events: GameEvent[], players: Player[]): DawnInfo | null {
-  const nightDeaths = events.filter(e => e.event_type === 'death' && e.phase?.startsWith('night'));
-  if (nightDeaths.length === 0) return { type: 'safe', text: '平安夜' };
-  const deadSeats = nightDeaths.map(e => {
-    const match = e.content?.match(/(\d+)号/);
-    return match ? parseInt(match[1], 10) : null;
-  }).filter(Boolean) as number[];
-  if (deadSeats.length === 0) return { type: 'safe', text: '平安夜' };
-  return { type: 'death', text: `#${deadSeats.join('号、')}号玩家 倒牌` };
-}
-
-function buildPhaseSystemMsg(phase: string): string {
-  switch (phase) {
-    case 'night_werewolf': return '⏳ 狼人正在行动...';
-    case 'night_seer': return '⏳ 预言家正在查验...';
-    case 'night_witch': return '⏳ 女巫正在使用药水...';
-    case 'day_announce': return '📢 天亮了，请睁眼';
-    case 'day_speech': return '📢 发言阶段开始';
-    case 'day_vote': return '📢 投票阶段开始';
-    default: return '';
-  }
-}
-
 export default function GamePage() {
   const { gameId } = useParams<{ gameId: string }>();
   const navigate = useNavigate();
@@ -167,8 +142,6 @@ export default function GamePage() {
   const [status, setStatus] = useState<GameState | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
-  const [dawnInfo, setDawnInfo] = useState<DawnInfo | null>(null);
-  const [nightToast, setNightToast] = useState<NightToast | null>(null);
   const [mvpVisible, setMvpVisible] = useState(false);
   const [gameFinished, setGameFinished] = useState(false);
   const [thinkingPlayers, setThinkingPlayers] = useState<Set<number>>(new Set());
@@ -178,28 +151,11 @@ export default function GamePage() {
   const prevPhaseRef = useRef<string>('');
   const processedChatSet = useRef<Set<string>>(new Set());
   const isFirstPhaseRef = useRef(true);
-  const nightToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const NIGHT_SUB_TOASTS: Record<string, NightToast> = {
-    night_werewolf: { icon: '🐺', text: '狼人行动' },
-    night_seer: { icon: '🔮', text: '预言家查验' },
-    night_witch: { icon: '🧪', text: '女巫行动' },
-    hunter_shoot: { icon: '🏹', text: '猎人开枪' },
-  };
-
-  function showNightToast(phase: string) {
-    if (nightToastTimerRef.current) clearTimeout(nightToastTimerRef.current);
-    const toast = NIGHT_SUB_TOASTS[phase];
-    if (toast) {
-      setNightToast(toast);
-      nightToastTimerRef.current = setTimeout(() => setNightToast(null), 2500);
-    }
-  }
-
-  const addSystemChat = useCallback((text: string, systemType?: 'phase' | 'vote') => {
+  const addSystemChat = useCallback((text: string) => {
     chatIdRef.current++;
     const cid = `sys-${chatIdRef.current}`;
-    const item: ChatItem = { id: cid, text, speaker: '', type: 'system', typing: false, systemType };
+    const item: ChatItem = { id: cid, text, speaker: '', type: 'system', typing: false };
     setChatItems(prev => [...prev, item]);
   }, []);
 
@@ -230,9 +186,6 @@ export default function GamePage() {
           const oldWasNight = prevPhase?.startsWith('night');
           const newIsDay = data.phase?.startsWith('day');
           if (oldWasNight && newIsDay) {
-            const dawn = buildDawnInfo(data.events || [], data.players || []);
-            setDawnInfo(dawn);
-            setTimeout(() => setDawnInfo(null), 4000);
             playDawnSound();
           }
 
@@ -277,7 +230,9 @@ export default function GamePage() {
       if (processedChatSet.current.has(speechKey)) return;
       processedChatSet.current.add(speechKey);
       const playerName = event.data?.player_name || `${event.player_id}号`;
-      const text = event.data?.public_content || '';
+      let text = event.data?.public_content || '';
+      const prefixRegex = new RegExp(`^\\d+号\\s*${playerName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[：:]\\s*`);
+      text = text.replace(prefixRegex, '');
       chatIdRef.current++;
       const chatId = `speech-${chatIdRef.current}`;
       const newItem: ChatItem = { id: chatId, text, speaker: playerName, type: 'speech', typing: true };
@@ -301,16 +256,24 @@ export default function GamePage() {
       }
     }
 
+    if (isGodView && ['action', 'seer_check', 'witch_use_antidote', 'witch_use_poison', 'witch_action', 'hunter_shoot'].includes(event.event_type || '')) {
+      const thought = event.data?.internal_thought || event.data?.reasoning_content;
+      if (thought) {
+        const thoughtKey = `night_thought_${event.player_id}_${event.round_number}_${event.phase}`;
+        if (processedChatSet.current.has(thoughtKey)) return;
+        processedChatSet.current.add(thoughtKey);
+        chatIdRef.current++;
+        const tId = `thought-${chatIdRef.current}`;
+        const thoughtItem: ChatItem = { id: tId, text: thought, speaker: event.data?.player_name || `${event.player_id}号`, type: 'thought', typing: false };
+        setChatItems(prev => [...prev, thoughtItem]);
+      }
+    }
+
     if (event.event_type === 'action' && event.phase === 'night_werewolf') {
       playKnifeSound();
     }
 
     if (event.event_type === 'death' && event.phase === 'day_announce') {
-      const content = event.data?.public_content || '';
-      const match = content.match(/(\d+)号/);
-      if (match) {
-        addSystemChat(`✅ 投票结果：#${match[1]}号被放逐`, 'vote');
-      }
       playVoteResultSound();
     }
 
@@ -350,16 +313,14 @@ export default function GamePage() {
     if (isFirstPhaseRef.current) {
       isFirstPhaseRef.current = false;
       prevPhaseRef.current = phase;
-      showNightToast(phase);
       return;
     }
     if (phase !== prev && prev !== '') {
-      const sysMsg = buildPhaseSystemMsg(phase);
-      if (sysMsg) addSystemChat(sysMsg, 'phase');
-      showNightToast(phase);
+      prevPhaseRef.current = phase;
+    } else {
+      prevPhaseRef.current = phase;
     }
-    prevPhaseRef.current = phase;
-  }, [status?.phase, addSystemChat]);
+  }, [status?.phase]);
 
   useEffect(() => {
     api.getGameStatus(Number(gameId)).then((res) => {
@@ -391,9 +352,6 @@ export default function GamePage() {
             const oldWasNight = prevPhase?.startsWith('night');
             const newIsDay = newPhase?.startsWith('day');
             if (oldWasNight && newIsDay) {
-              const dawn = buildDawnInfo(data.events || [], data.players || []);
-              setDawnInfo(dawn);
-              setTimeout(() => setDawnInfo(null), 4000);
               playDawnSound();
             }
 
@@ -438,22 +396,10 @@ export default function GamePage() {
 
   const winner = status.winner;
   const isFinished = status.phase === 'finished' || !!winner;
-  const isNight = status.phase.startsWith('night');
-  const showDawnOverlay = !!dawnInfo;
 
   return (
     <>
       <BackgroundParticles />
-      <PhaseOverlay visible={isNight || showDawnOverlay} dawnInfo={showDawnOverlay ? dawnInfo : null} nightToast={nightToast} />
-
-      <AnimatePresence>
-        {dawnInfo && (
-          <DawnBanner
-            info={dawnInfo}
-            onDone={() => {}}
-          />
-        )}
-      </AnimatePresence>
 
       <div className="game-layout">
         <BattleLog events={logs} />
@@ -549,7 +495,7 @@ export default function GamePage() {
                 return (
                   <div
                     key={item.id}
-                    className={`chat-system-msg ${item.systemType === 'phase' ? 'phase-notice' : item.systemType === 'vote' ? 'vote-result' : ''}`}
+                    className="chat-system-msg"
                   >
                     {item.text}
                   </div>
@@ -561,7 +507,7 @@ export default function GamePage() {
                   text={item.text}
                   speaker={item.speaker}
                   type={item.type}
-                  typing={item.typing}
+                  typing={item.typing || false}
                 />
               );
             })}

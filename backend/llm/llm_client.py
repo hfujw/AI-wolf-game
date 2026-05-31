@@ -36,12 +36,16 @@ class LLMClient:
         model = cfg["model"]
 
         last_error = None
+        # 指数退避重试: 第0次立即, 第1次等2s, 第2次等4s
         for attempt in range(self.max_retries + 1):
             try:
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
+                response = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=temperature,
+                    ),
+                    timeout=45,  # 每次 LLM 调用最多 45s
                 )
 
                 content = response.choices[0].message.content or ""
@@ -58,8 +62,10 @@ class LLMClient:
                 last_error = "LLM request timed out"
             except Exception as e:
                 last_error = str(e)
-                if attempt < self.max_retries:
-                    await asyncio.sleep(1 * (attempt + 1))
+
+            if attempt < self.max_retries:
+                wait = 2 ** attempt  # 1s, 2s, 4s（指数退避）
+                await asyncio.sleep(wait)
 
         raise Exception(f"LLM request failed after {self.max_retries + 1} attempts: {last_error}")
 
@@ -141,16 +147,16 @@ class LLMClient:
 
         if phase == "night_werewolf":
             target_id = str(random.choice(valid_targets)) if valid_targets else None
-            return AgentDecision(action="kill", target_id=target_id, internal_thought="Fallback: random target.")
+            return AgentDecision(action="kill", target_id=target_id, internal_thought="LLM调用暂不可用，使用备用策略选择目标。")
         elif phase == "night_seer":
             target_id = str(random.choice(valid_targets)) if valid_targets else None
-            return AgentDecision(action="check", target_id=target_id, internal_thought="Fallback: random target.")
+            return AgentDecision(action="check", target_id=target_id, internal_thought="LLM调用暂不可用，使用备用策略选择查验目标。")
         elif phase == "night_witch":
-            return AgentDecision(action="witch_action", use_antidote=True, use_poison=False, poison_target=None, internal_thought="Fallback: using antidote as default.")
+            return AgentDecision(action="witch_action", use_antidote=True, use_poison=False, poison_target=None, internal_thought="LLM调用暂不可用，默认使用解药救人。")
         elif phase == "day_speech":
-            return AgentDecision(action="speech", speech=random.choice(speeches), internal_thought="Fallback: random speech.")
+            return AgentDecision(action="speech", speech=random.choice(speeches), internal_thought="LLM调用暂不可用，使用备用发言模板。")
         elif phase == "day_vote":
             target_id = str(random.choice(valid_targets)) if valid_targets else None
-            return AgentDecision(action="vote", target_id=target_id, internal_thought="Fallback: random vote.")
+            return AgentDecision(action="vote", target_id=target_id, internal_thought="LLM调用暂不可用，使用备用投票策略。")
         else:
             return AgentDecision(action="pass", internal_thought="No action available.")

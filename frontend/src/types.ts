@@ -63,11 +63,6 @@ export interface WSEvent {
   timestamp: string | null;
 }
 
-export interface RoomInfo {
-  room_id: number;
-  room_code: string;
-}
-
 export const ROLE_LABELS: Record<string, string> = {
   werewolf: '狼人',
   seer: '预言家',

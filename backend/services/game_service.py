@@ -51,7 +51,7 @@ class GameService:
             personality = personality_list[idx]
             role_personality_count[role] = idx + 1
 
-            player_name = f"Player_{seat}号"
+            player_name = f"Player_{seat}"
             player = GamePlayer(
                 game_id=game.id, player_name=player_name, role=role,
                 personality=personality, is_alive=True, seat_number=seat,

@@ -50,7 +50,7 @@ export default function BackgroundParticles() {
     let animId: number;
 
     function draw() {
-      ctx.clearRect(0, 0, w, h);
+      ctx?.clearRect(0, 0, w, h);
 
       for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
@@ -64,10 +64,10 @@ export default function BackgroundParticles() {
         }
 
         const alpha = p.opacity * (1 - p.life / p.maxLife);
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(180, 200, 255, ${alpha})`;
-        ctx.fill();
+        ctx?.beginPath();
+        ctx?.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        if (ctx) ctx.fillStyle = `rgba(180, 200, 255, ${alpha})`;
+        ctx?.fill();
       }
 
       while (particles.length < maxParticles) {

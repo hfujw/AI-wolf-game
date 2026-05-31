@@ -9,39 +9,7 @@ class SeerAgent(BaseAgent):
         super().__init__(player_id, "seer", personality, llm_client)
 
     async def decide(self, context: AgentContext) -> AgentDecision:
-        try:
-            if context.phase == "night_seer":
-                return await self._decide_check(context)
-            elif context.phase == "day_speech":
-                return await self._decide_speech(context)
-            elif context.phase == "day_vote":
-                return await self._decide_vote(context)
-            else:
-                return AgentDecision(action="pass", internal_thought="等待下一阶段。")
-        except Exception:
-            return self.llm_client.get_fallback(context.phase, self.role, context.valid_targets)
-
-    def _build_alive_str(self, context: AgentContext) -> str:
-        parts = []
-        for p in context.alive_players:
-            if p.is_alive:
-                parts.append(f"{p.seat_number}号({p.name})")
-        return ", ".join(parts)
-
-    def _build_valid_str(self, context: AgentContext) -> str:
-        id_to_seat = {p.id: p.seat_number for p in context.alive_players}
-        return ", ".join(str(id_to_seat.get(vid, vid)) for vid in context.valid_targets)
-
-    def _build_history(self, context: AgentContext) -> str:
-        lines = []
-        for event in context.visible_events[-20:]:
-            line = f"[第{event.round_number}轮][{event.phase}] "
-            if event.public_content:
-                line += event.public_content
-            if event.private_content:
-                line += f" (私密: {event.private_content})"
-            lines.append(line)
-        return "\n".join(lines) if lines else ""
+        return await self._decide_with_react(context)
 
     def _format_seer_checks(self, context: AgentContext) -> str:
         if not context.seer_checks:
