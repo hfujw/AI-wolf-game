@@ -1,12 +1,13 @@
 import asyncio
-import json
-import random
 import re
+import random
 
 from openai import AsyncOpenAI
+import json_repair
 
 from config import DEFAULT_AGENT_CONFIG, AGENT_CONFIGS, Config
 from schemas.game_schemas import AgentDecision
+from middleware.logger import logger
 
 
 class LLMClient:
@@ -36,7 +37,6 @@ class LLMClient:
         model = cfg["model"]
 
         last_error = None
-        # 指数退避重试: 第0次立即, 第1次等2s, 第2次等4s
         for attempt in range(self.max_retries + 1):
             try:
                 response = await asyncio.wait_for(
@@ -45,7 +45,7 @@ class LLMClient:
                         messages=messages,
                         temperature=temperature,
                     ),
-                    timeout=45,  # 每次 LLM 调用最多 45s
+                    timeout=45,
                 )
 
                 content = response.choices[0].message.content or ""
@@ -60,66 +60,42 @@ class LLMClient:
 
             except asyncio.TimeoutError:
                 last_error = "LLM request timed out"
+                logger.warning(f"LLM timeout (attempt {attempt + 1}/{self.max_retries + 1})")
             except Exception as e:
                 last_error = str(e)
+                logger.warning(f"LLM error (attempt {attempt + 1}/{self.max_retries + 1}): {e}")
 
             if attempt < self.max_retries:
-                wait = 2 ** attempt  # 1s, 2s, 4s（指数退避）
+                wait = 2 ** attempt
                 await asyncio.sleep(wait)
 
+        logger.error(f"LLM request failed after {self.max_retries + 1} attempts: {last_error}")
         raise Exception(f"LLM request failed after {self.max_retries + 1} attempts: {last_error}")
 
     def _parse_json(self, content: str) -> dict:
+        """使用 json_repair 鲁棒解析 LLM 返回的 JSON"""
         try:
-            return json.loads(content)
-        except json.JSONDecodeError:
+            return json_repair.loads(content)
+        except Exception:
             pass
 
         json_match = re.search(r'\{[\s\S]*\}', content)
         if json_match:
             try:
-                return json.loads(json_match.group())
-            except json.JSONDecodeError:
+                return json_repair.loads(json_match.group())
+            except Exception:
                 pass
 
-        result: dict = {}
-        for key, pattern in [
-            ("target_id", r'"target_id"\s*:\s*"?(\d+)"?'),
-            ("speech", r'"speech"\s*:\s*"(.*?)"(?:\s*,|\s*\}|\s*$)',),
-            ("content", r'"content"\s*:\s*"(.*?)"(?:\s*,|\s*\}|\s*$)'),
-            ("internal_thought", r'"internal_thought"\s*:\s*"(.*?)"(?:\s*,|\s*\}|\s*$)'),
-            ("action", r'"action"\s*:\s*"([^"]*)"'),
-        ]:
-            m = re.search(pattern, content, re.DOTALL)
-            if m:
-                result[key] = m.group(1)
+        if not content.strip():
+            return {"speech": "过。", "internal_thought": "无内容"}
 
-        for key, pattern in [
-            ("use_antidote", r'"use_antidote"\s*:\s*(true|false)'),
-            ("use_poison", r'"use_poison"\s*:\s*(true|false)'),
-        ]:
-            m = re.search(pattern, content)
-            if m:
-                result[key] = m.group(1) == "true"
-
-        m = re.search(r'"poison_target"\s*:\s*"?(\d+)"?', content)
-        if m:
-            result["poison_target"] = m.group(1)
-
-        if "content" in result and "speech" not in result:
-            result["speech"] = result["content"]
-
-        if not result:
-            result["speech"] = content.strip()
-
-        return result
+        return {"speech": content.strip(), "internal_thought": content[:500]}
 
     def get_fallback(self, phase: str, role: str, valid_targets: list = None) -> AgentDecision:
         if valid_targets is None:
             valid_targets = []
 
-        import logging
-        logging.getLogger('llm_client').warning(f"⚠️ Using FALLBACK for {role} in {phase} (LLM API call failed)")
+        logger.warning(f"使用 FALLBACK for {role} in {phase} (LLM API call failed)")
 
         FALLBACK_SPEECHES = {
             "werewolf": [

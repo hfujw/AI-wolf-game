@@ -1,6 +1,5 @@
 import asyncio
 import random
-import traceback
 import time
 from datetime import datetime, timezone
 
@@ -13,6 +12,7 @@ from models.game_player import GamePlayer
 from models.game_event import GameEvent
 from config import Config
 from db.database import async_session
+from middleware.logger import logger
 
 
 class StatsTracker:
@@ -125,7 +125,8 @@ class GameEngine:
         ts = time.strftime("%H:%M:%S")
         line = f"[{ts}] {msg}"
         self._log.append(line)
-        print(line, flush=True)
+        from middleware.logger import logger
+        logger.info(msg)
 
     def _log_god_view_start(self):
         werewolves = [p for p in self.players if p.role == "werewolf" and p.is_alive]
@@ -184,8 +185,7 @@ class GameEngine:
                 try:
                     await self.night_phase()
                 except Exception as e:
-                    self.log(f"夜晚阶段异常: {e}")
-                    traceback.print_exc()
+                    logger.exception(f"夜晚阶段异常: {e}")
                     break
 
                 if self.winner:
@@ -196,8 +196,7 @@ class GameEngine:
                 try:
                     await self.day_phase()
                 except Exception as e:
-                    self.log(f"白天阶段异常: {e}")
-                    traceback.print_exc()
+                    logger.exception(f"白天阶段异常: {e}")
                     break
 
             if self.winner is None:
@@ -205,7 +204,7 @@ class GameEngine:
 
         except Exception as e:
             self.log(f"游戏主循环致命错误: {e}")
-            traceback.print_exc()
+            logger.exception(f"游戏主循环致命错误: {e}")
             self.winner = "draw"
         finally:
             self.log(f"游戏结束: {self.winner}")

@@ -10,7 +10,7 @@ def _env(key: str, default: str = "") -> str:
 
 
 DEFAULT_AGENT_CONFIG = {
-    "api_key": _env("LLM_API_KEY", "86c4a679a2a146da8434da7675e27d62.ltS42pWtUWoNoQJq"),
+    "api_key": _env("LLM_API_KEY"),
     "base_url": _env("LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/"),
     "model": _env("LLM_MODEL", "GLM-4-Flash"),
 }
