@@ -10,6 +10,9 @@ from models.room import Room
 from models.game import Game
 from models.game_player import GamePlayer
 from models.game_event import GameEvent
+from repositories.game_repo import GameRepo
+from repositories.player_repo import PlayerRepo
+from repositories.event_repo import EventRepo
 from schemas.game_schemas import (
     JoinRoomRequest,
     GameStatusResponse,
@@ -26,6 +29,37 @@ from schemas.game_schemas import (
 from services.game_service import GameService, game_services
 
 router = APIRouter()
+
+
+async def _get_game_with_data(game_id: int, db: AsyncSession) -> tuple[Game, list[GamePlayer], list[GameEvent]]:
+    """公共查询：获取Game+Players+Events"""
+    game_repo = GameRepo(db)
+    player_repo = PlayerRepo(db)
+    event_repo = EventRepo(db)
+
+    game = await game_repo.get_by_id(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="对局不存在")
+
+    players = await player_repo.get_by_game(game_id)
+    events = await event_repo.get_by_game(game_id)
+
+    return game, players, events
+
+
+def _build_replay_events(events: list[GameEvent], player_map: dict[int, GamePlayer]) -> list[ReplayEvent]:
+    """构建回放事件列表"""
+    return [
+        ReplayEvent(
+            round_number=e.round_number, phase=e.phase,
+            player_id=e.player_id,
+            player_name=player_map[e.player_id].player_name if e.player_id and e.player_id in player_map else None,
+            event_type=e.event_type, public_content=e.public_content,
+            private_content=e.private_content, internal_thought=e.internal_thought,
+            reasoning_content=e.reasoning_content,
+        )
+        for e in events
+    ]
 
 
 @router.post("/games/start")
@@ -166,104 +200,18 @@ async def debug_game(game_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.get("/games/{game_id}/replay", response_model=ReplayResponse)
 async def get_game_replay(game_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Game).where(Game.id == game_id))
-    game = result.scalar_one_or_none()
-    if not game:
-        raise HTTPException(status_code=404, detail="对局不存在")
-
-    player_result = await db.execute(
-        select(GamePlayer).where(GamePlayer.game_id == game_id)
-    )
-    players = player_result.scalars().all()
-
-    event_result = await db.execute(
-        select(GameEvent)
-        .where(GameEvent.game_id == game_id)
-        .order_by(GameEvent.id)
-    )
-    events = event_result.scalars().all()
-
+    game, players, events = await _get_game_with_data(game_id, db)
     player_map = {p.id: p for p in players}
-    replay_events = []
-    for e in events:
-        pname = None
-        if e.player_id and e.player_id in player_map:
-            pname = player_map[e.player_id].player_name
-        replay_events.append(ReplayEvent(
-            round_number=e.round_number,
-            phase=e.phase,
-            player_id=e.player_id,
-            player_name=pname,
-            event_type=e.event_type,
-            public_content=e.public_content,
-            private_content=e.private_content,
-            internal_thought=e.internal_thought,
-            reasoning_content=e.reasoning_content,
-        ))
-
-    players_data = [
-        {
-            "id": p.id,
-            "name": p.player_name,
-            "role": p.role,
-            "seat_number": p.seat_number,
-            "is_alive": p.is_alive,
-        }
-        for p in players
-    ]
-
-    return ReplayResponse(game_id=game.id, players=players_data, events=replay_events)
+    players_data = [{"id": p.id, "name": p.player_name, "role": p.role, "seat_number": p.seat_number, "is_alive": p.is_alive} for p in players]
+    return ReplayResponse(game_id=game.id, players=players_data, events=_build_replay_events(events, player_map))
 
 
 @router.get("/games/{game_id}/events", response_model=EventsResponse)
 async def get_game_events(game_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Game).where(Game.id == game_id))
-    game = result.scalar_one_or_none()
-    if not game:
-        raise HTTPException(status_code=404, detail="对局不存在")
-
-    player_result = await db.execute(
-        select(GamePlayer).where(GamePlayer.game_id == game_id)
-    )
-    players = player_result.scalars().all()
-
-    event_result = await db.execute(
-        select(GameEvent)
-        .where(GameEvent.game_id == game_id)
-        .order_by(GameEvent.id)
-    )
-    events = event_result.scalars().all()
-
+    game, players, events = await _get_game_with_data(game_id, db)
     player_map = {p.id: p for p in players}
-    replay_events = []
-    for e in events:
-        pname = None
-        if e.player_id and e.player_id in player_map:
-            pname = player_map[e.player_id].player_name
-        replay_events.append(ReplayEvent(
-            round_number=e.round_number,
-            phase=e.phase,
-            player_id=e.player_id,
-            player_name=pname,
-            event_type=e.event_type,
-            public_content=e.public_content,
-            private_content=e.private_content,
-            internal_thought=e.internal_thought,
-            reasoning_content=e.reasoning_content,
-        ))
-
-    players_data = [
-        {
-            "id": p.id,
-            "name": p.player_name,
-            "role": p.role,
-            "seat_number": p.seat_number,
-            "is_alive": p.is_alive,
-        }
-        for p in players
-    ]
-
-    return EventsResponse(game_id=game.id, players=players_data, events=replay_events)
+    players_data = [{"id": p.id, "name": p.player_name, "role": p.role, "seat_number": p.seat_number, "is_alive": p.is_alive} for p in players]
+    return EventsResponse(game_id=game.id, players=players_data, events=_build_replay_events(events, player_map))
 
 
 @router.get("/games/{game_id}/stats", response_model=StatsResponse)
